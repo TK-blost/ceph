@@ -128,11 +128,6 @@ static int accumulate_inode_metadata(cls_method_context_t hctx,
   assert(in != NULL);
   assert(out != NULL);
 
-  std::string obj_xattr_name;
-  std::string mtime_xattr_name;
-  uint64_t input_obj_id = 0;
-  uint64_t input_obj_size = 0;
-  time_t input_mtime = 0;
   int r = 0;
 
   // Decode `in`
@@ -154,6 +149,11 @@ static int accumulate_inode_metadata(cls_method_context_t hctx,
   }
 
   r = set_if_greater(hctx, mtime_xattr_name, input_mtime);
+  if (r < 0) {
+    return r;
+  }
+
+  r = set_if_greater(hctx, max_size_xattr_name, input_obj_size);
   if (r < 0) {
     return r;
   }
