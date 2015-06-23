@@ -20,19 +20,108 @@
 int ClsCephFSClient::accumulate_inode_metadata(
   librados::IoCtx &ctx,
   inodeno_t inode_no,
-  const AccumulateArgs &args)
+  const uint64_t obj_index,
+  const uint64_t obj_size,
+  const time_t mtime)
 {
-    // Generate 0th object name, where we will accumulate sizes/mtimes
-    object_t zeroth_object = InodeStore::get_object_name(inode_no, frag_t(), "");
+  AccumulateArgs args(
+      obj_index,
+      obj_size,
+      mtime,
+      std::string("scan_ceiling"),
+      std::string("scan_max_mtime"),
+      std::string("scan_max_size"));
 
-    // Construct a librados operation invoking our class method
-    librados::ObjectReadOperation op;
-    bufferlist inbl;
-    args.encode(inbl);
-    op.exec("cephfs", "accumulate_inode_metadata", inbl);
+  // Generate 0th object name, where we will accumulate sizes/mtimes
+  object_t zeroth_object = InodeStore::get_object_name(inode_no, frag_t(), "");
 
-    // Execute op
-    bufferlist outbl;
-    return ctx.operate(zeroth_object.name, &op, &outbl);
+  // Construct a librados operation invoking our class method
+  librados::ObjectReadOperation op;
+  bufferlist inbl;
+  args.encode(inbl);
+  op.exec("cephfs", "accumulate_inode_metadata", inbl);
+
+  // Execute op
+  bufferlist outbl;
+  return ctx.operate(zeroth_object.name, &op, &outbl);
+}
+
+int ClsCephFSClient::fetch_inode_accumulate_result(
+  librados::IoCtx &ctx,
+  const std::string &oid,
+  inode_backtrace_t *backtrace,
+  AccumulateResult *result)
+{
+  assert(backtrace != NULL);
+  assert(result != NULL);
+
+  librados::ObjectReadOperation op;
+
+  int scan_ceiling_r = 0;
+  bufferlist scan_ceiling_bl;
+  op.getxattr("scan_ceiling", &scan_ceiling_bl, &scan_ceiling_r);
+
+  int scan_max_size_r = 0;
+  bufferlist scan_max_size_bl;
+  op.getxattr("scan_max_size", &scan_max_size_bl, &scan_max_size_r);
+
+  int scan_max_mtime_r = 0;
+  bufferlist scan_max_mtime_bl;
+  op.getxattr("scan_max_mtime", &scan_max_mtime_bl, &scan_max_mtime_r);
+
+  int parent_r = 0;
+  bufferlist parent_bl;
+  op.getxattr("parent", &parent_bl, &parent_r);
+
+  bufferlist op_bl;
+  int r = ctx.operate(oid, &op, &op_bl);
+  if (r < 0 && r != -ENODATA) {
+    // ENODATA acceptable from parent getxattr (just means there happens
+    // not to be a backtrace)
+    return r;
+  }
+
+  // Load scan_ceiling
+  try {
+    bufferlist::iterator scan_ceiling_bl_iter = scan_ceiling_bl.begin();
+    ObjCeiling ceiling;
+    ceiling.decode(scan_ceiling_bl_iter);
+    result->ceiling_obj_index = ceiling.id;
+    result->ceiling_obj_size = ceiling.size;
+  } catch (const buffer::error &err) {
+    //dout(4) << "Invalid size attr on '" << oid << "'" << dendl;
+    return -EINVAL;
+  }
+
+  // Load scan_max_size
+  try {
+    bufferlist::iterator scan_max_size_bl_iter = scan_max_size_bl.begin();
+    ::decode(result->max_obj_size, scan_max_size_bl_iter);
+  } catch (const buffer::error &err) {
+    //dout(4) << "Invalid size attr on '" << oid << "'" << dendl;
+    return -EINVAL;
+  }
+
+  // Load scan_max_mtime
+  try {
+    bufferlist::iterator scan_max_mtime_bl_iter = scan_max_mtime_bl.begin();
+    ::decode(result->max_mtime, scan_max_mtime_bl_iter);
+  } catch (const buffer::error &err) {
+    //dout(4) << "Invalid size attr on '" << oid << "'" << dendl;
+    return -EINVAL;
+  }
+
+  // Deserialize backtrace
+  if (parent_bl.length()) {
+    try {
+      bufferlist::iterator q = parent_bl.begin();
+      backtrace->decode(q);
+    } catch (buffer::error &e) {
+      //dout(4) << "Corrupt backtrace on '" << oid << "': " << e << dendl;
+      return -EINVAL;
+    }
+  }
+
+  return 0;
 }
 
